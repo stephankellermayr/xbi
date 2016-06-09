@@ -1,0 +1,1499 @@
+#!/bin/bash
+#
+# Linux Bash Installer (XBI) v0.0.3-alpha
+#
+# This is just a collection of bash-functions/helpers for various installer-routines. It's NOT a standalone tool.
+#
+# Structure of this file:
+# - editable variables
+# - non-editable system relevant variables
+# - Translations
+# - Tasks
+#     task_*
+# - Installer relevant functions
+#     xbi_*
+# - Helpers for colored output
+#     color_*
+# - Functions to format output
+#     echo_*
+# - Some formatted views for the frontend
+#     view_*
+# - Dialog functions  for the frontend
+#     dialog_*
+# - Bootstrap
+#
+# GNU GENERAL PUBLIC LICENSE Version 2
+# Written by stephan.kellermayr@gmail.com
+#
+
+[[ -z ${pluginId} ]] && echo "This script needs to be called by a plugin." && exit 1
+[ "$(whoami)" != "root" ] && echo "You need to be root!" && exit 1
+
+
+
+################################################################################
+# VARIABLES
+#
+# Do NOT replace/delete the following variables here.
+# Create a file with the name "${pluginId}.conf" in the same
+# directory instead and change them in this file!
+#
+################################################################################
+
+# Get absolute path to this script and use it as source-path
+script=$(readlink -f $0)
+path_source=$(dirname $script)
+
+# Script variables
+installerLanguage=en
+# Auto-generate passwords instead of displaying a dialog
+passwordAutogen=1
+# Program to display a debian-friendly userinput-dialog
+whiptail=$(which whiptail)
+# Program to manage packages
+aptget=$(which apt-get)
+# Command to install new packages
+installCmd="${aptget} -y install"
+# Command to completely remove packages
+removeCmd="${aptget} -y remove --purge"
+# Command to update packages
+updateCmd="${aptget} -y update"
+# Command to upgrade packages
+upgradeCmd="${aptget} -y upgrade"
+# Logfile for the installer
+logFile=${path_source}/${pluginId}.log
+# Password file
+passwdFile=${path_source}/${pluginId}.pwd
+# External configuration
+confFile=${path_source}/${pluginId}.conf
+# Contains the tasknames selected by whiptail
+taskFile=${path_source}/${pluginId}.tasks
+# Used in xbi_lastlog
+logTail=10
+# String with chars for spinning-wheel
+spinnerText="--  "
+# Sleep time between displayed chars
+spinnerSleeptime=0.035
+# Default command when queue is executed in silent-mode
+defaultWaitCmd="sleep 0.525"
+# Contains the name of the currently running task
+currentTask=""
+# Contains the name of the currently running subtask
+currentSubTask=""
+# Show user-inputs or run unattended installation (0|1|2)
+#	0 = show userinput for each variable
+#	1 = show userinput if neccessary only
+#	2 = do not show userinput (use predefined variables)
+#unattendedInstallation=0
+# Replace passwords when writing commands to log-file
+hidePasswordsInLogFile=1
+
+
+
+################################################################################
+# TASK Arrays
+################################################################################
+
+# Array-container for available tasks
+declare -a tasks
+
+# Array-container for tasks to be installed
+declare -A tasks_install
+
+# Array-container for the task-configuration
+declare -A task
+
+
+
+################################################################################
+# LABELS
+################################################################################
+
+# Set labels/messages
+declare -A label
+
+#-------------------------------------------------------------------------------
+# Labels/Messages [EN]
+#-------------------------------------------------------------------------------
+label["en_title"]="XBI | Linux Bash Installer"
+label["en_yes"]="Yes"
+label["en_no"]="No"
+label["en_skipped"]="Skipped"
+label["en_next"]="Next"
+label["en_cancel"]="Cancel"
+label["en_continueQuestion"]="Do you want to run the installation [y/N]?"
+label["en_continueInstallation"]="Continuing installation..."
+label["en_exitOnError"]="--- Aborted by failure ---"
+label["en_exitOnUser"]="--- Aborted by user ---"
+label["en_end"]="--- Installation done ---"
+
+label["en_dialog_welcome_title"]="XBI Installer"
+label["en_dialog_welcome_message"]="Welcome to the install-helper \"Linux Bash Installer (XBI)\"."
+label["en_dialog_tasks_title"]="Tasks"
+label["en_dialog_tasks_message"]="Please choose the tasks:"
+label["en_dialog_checkPassword_different"]="The given passwords are different!\n\nPlease retry."
+label["en_dialog_checkPassword_toShort"]="The password must not be empty!\n\nPlease retry."
+
+label["en_view_tasks"]="Chosen tasks:"
+label["en_view_summary"]="Summary:"
+
+label["en_xbi_init_os_ok"]="OS-Version: ###"
+label["en_xbi_init_os_fail"]="OS is not a Debian 8.x (Jessie)"
+
+label["en_xbi_init_prepare"]="Initalize installer"
+label["en_xbi_init_prepate_ok"]="Installer successfully initialized"
+label["en_xbi_init_prepare_fail"]="Failed to initialize installer"
+
+label["en_xbi_package_install"]="Install package(s)"
+label["en_xbi_package_install_ok"]="Package(s) successfully installed"
+label["en_xbi_package_install_fail"]="Failed to install package(s)"
+label["en_xbi_package_remove"]="Remove package(s)"
+label["en_xbi_package_remove_ok"]="Packge(s) succesfully removed"
+label["en_xbi_package_remove_fail"]="Failed to remove package(s)"
+label["en_xbi_package_update"]="Update sources list"
+label["en_xbi_package_update_ok"]="Sources list successfully updates"
+label["en_xbi_package_update_fail"]="Failed to update sources list"
+label["en_xbi_package_upgrade"]="Update packages"
+label["en_xbi_package_upgrade_ok"]="Packages successfully updates"
+label["en_xbi_package_upgrade_fail"]="Failed to update packages"
+label["en_xbi_package_start"]="Starting ###"
+label["en_xbi_package_start_ok"]="### successfully started"
+label["en_xbi_package_start_fail"]="Failed to start ###"
+label["en_xbi_package_restart"]="Restarting ###"
+label["en_xbi_package_restart_ok"]="### succesfully restartet"
+label["en_xbi_package_restart_fail"]="Failed to restart ###"
+label["en_xbi_package_reload"]="Reloading ###"
+label["en_xbi_package_reload_ok"]="### successfully reloaded"
+label["en_xbi_package_reload_fail"]="Failed to reload ###"
+
+label["en_xbi_backup"]="Backup of file ###"
+label["en_xbi_backup_softfail"]="Backup ### already exist"
+
+label["en_xbi_lastlog"]="Last ###N### lines of ###LOG###"
+
+label["en_taskSuccess"]="Task executed successfully"
+label["en_taskFailed"]="Task could not be executed successfully"
+label["en_taskNotFound"]="Task \"###\" not found"
+label["en_runningHook"]="Execute subtask \"###\" aus"
+label["en_hookError"]="Failed to execute subtask \"###\""
+
+label["en_xbi_iniMod_comment"]="Comment \"###4###\" in ###3###"
+label["en_xbi_iniMod_uncomment"]="Uncomment \"###4###\" in ###3###"
+label["en_xbi_iniMod_setValue"]="Set \"###6###\" for parameter \"###5###\" in ###3###"
+label["en_xbi_iniMod_appendValue"]="Add \"###6###\" to parameter \"###5###\" in ###3###"
+label["en_xbi_iniMod_replaceValue"]="Replace \"###7###\" with \"###6###\" in parameter \"###5###\" in ###3###"
+label["en_xbi_iniMod_addParam"]="Add parameter \"###5###\" to ###3###"
+label["en_xbi_iniMod_removeParam"]="Remove parameter \"###5###\" in ###3###"
+
+label["en_xbi_confMod_comment"]="Comment \"###4###\" in ###3###"
+label["en_xbi_confMod_uncomment"]="Uncomment \"###4###\" in ###3###"
+label["en_xbi_confMod_setValue"]="Set \"###5###\" for parameter \"###4###\" in ###3###"
+label["en_xbi_confMod_appendValue"]="Add \"###5###\" to parameter \"###4###\" in ###3###"
+label["en_xbi_confMod_replaceValue"]="Replacing \"###6###\" with \"###5###\" in parameter \"###4###\" in ###3###"
+
+label["en_xbi_cmd"]="..."
+
+#-------------------------------------------------------------------------------
+# Labels/Messages [DE]
+#-------------------------------------------------------------------------------
+label["de_title"]="XBI | Linux Bash Installer"
+label["de_yes"]="Ja"
+label["de_no"]="Nein"
+label["de_skipped"]="Übersprungen"
+label["de_next"]="Weiter"
+label["de_cancel"]="Abbrechen"
+label["de_continueQuestion"]="Wollen Sie mit der Installation fortfahren [j/N]?"
+label["de_continueInstallation"]="Installation wird fortgesetzt..."
+label["de_exitOnError"]="--- Abbruch durch Fehler ---"
+label["de_exitOnUser"]="--- Abbruch durch Benutzer ---"
+label["de_end"]="--- Installation abgeschlossen ---"
+
+label["de_dialog_welcome_title"]="XBI Installer"
+label["de_dialog_welcome_message"]="Willkommen beim Installationshelfer \"Linux Bash Installer (XBI)\"."
+label["de_dialog_tasks_title"]="Aufgaben"
+label["de_dialog_tasks_message"]="Wählen Sie bitte die auszuführenden Aufgaben:"
+label["de_dialog_checkPassword_different"]="Die eingegebenen Passwörter sind unterschiedlich!\n\nBitte wiederholen Sie die Eingabe."
+label["de_dialog_checkPassword_toShort"]="Das Passwort darf nicht leer sein!\n\nBitte wiederholen Sie die Eingabe."
+
+label["de_view_tasks"]="gewählte Aufgaben:"
+label["de_view_summary"]="Zusammenfassung:"
+
+label["de_xbi_init_os_ok"]="Betriebssystemversion: ###"
+label["de_xbi_init_os_fail"]="Betriebssystem ist kein Debian 8.x (Jessie)"
+
+label["de_xbi_init_prepare"]="Installer wird vorbereitet"
+label["de_xbi_init_prepate_ok"]="Installer wurde erfolgreich vorbereitet"
+label["de_xbi_init_prepare_fail"]="Fehler beim Vorbereiten des Installers"
+
+label["de_xbi_package_install"]="Pakete werden installiert"
+label["de_xbi_package_install_ok"]="Pakete wurden erfolgreich installiert"
+label["de_xbi_package_install_fail"]="Fehler beim Installieren der Pakete"
+label["de_xbi_package_remove"]="Pakete werden entfernt"
+label["de_xbi_package_remove_ok"]="Pakete wurden erfolgreich entfernt"
+label["de_xbi_package_remove_fail"]="Fehler beim Entfernen der Pakete"
+label["de_xbi_package_update"]="Paketliste wird aktualisiert"
+label["de_xbi_package_update_ok"]="Paketliste wurde erfolgreich aktualisiert"
+label["de_xbi_package_update_fail"]="Fehler beim Aktualisieren der Paketliste"
+label["de_xbi_package_upgrade"]="Pakete werden aktualisiert"
+label["de_xbi_package_upgrade_ok"]="Pakete wurden erfolgreich aktualisiert"
+label["de_xbi_package_upgrade_fail"]="Fehler beim Aktualisieren der Pakete"
+label["de_xbi_package_start"]="### wird gestartet"
+label["de_xbi_package_start_ok"]="### wurde erfolgreich gestartet"
+label["de_xbi_package_start_fail"]="Fehler beim Starten von ###"
+label["de_xbi_package_restart"]="### wird neu gestartet"
+label["de_xbi_package_restart_ok"]="### wurde erfolgreich neu gestartet"
+label["de_xbi_package_restart_fail"]="Fehler beim neu Starten von ###"
+label["de_xbi_package_reload"]="### wird neu geladen"
+label["de_xbi_package_reload_ok"]="### wurde erfolgreich neu geladen"
+label["de_xbi_package_reload_fail"]="Fehler beim neu Laden von ###"
+
+label["de_xbi_backup"]="Backup der Datei ###"
+label["de_xbi_backup_softfail"]="Backup ### bereits vorhanden"
+
+label["de_xbi_lastlog"]="Letzten ###N### Zeilen aus ###LOG###"
+
+label["de_taskSuccess"]="Aufgabe wurde ausgeführt"
+label["de_taskFailed"]="Aufgabe wurde nicht erfolgreich ausgeführt"
+label["de_taskNotFound"]="Aufgabe \"###\" nicht gefunden"
+label["de_runningHook"]="Führe sekundäre Aufgabe \"###\" aus"
+label["de_hookError"]="Fehler beim Ausführen der sekundären Aufgabe \"###\""
+
+label["de_xbi_iniMod_comment"]="Kommentieren von \"###4###\" in ###3###"
+label["de_xbi_iniMod_uncomment"]="Auskommentieren von \"###4###\" in ###3###"
+label["de_xbi_iniMod_setValue"]="Setze \"###6###\" für Parameter \"###5###\" in ###3###"
+label["de_xbi_iniMod_appendValue"]="Füge \"###6###\" dem Parameter \"###5###\" in ###3### hinzu"
+label["de_xbi_iniMod_replaceValue"]="Ersetze \"###7###\" mit \"###6###\" in Parameter \"###5###\" in ###3###"
+label["de_xbi_iniMod_addParam"]="Füge Parameter \"###5###\" zu ###3### hinzu"
+label["de_xbi_iniMod_removeParam"]="Entferne Parameter \"###5###\" in ###3###"
+
+label["de_xbi_confMod_comment"]="Kommentieren von \"###4###\" in ###3###"
+label["de_xbi_confMod_uncomment"]="Auskommentieren von \"###4###\" in ###3###"
+label["de_xbi_confMod_setValue"]="Setze \"###5###\" für Parameter \"###4###\" in ###3###"
+label["de_xbi_confMod_appendValue"]="Füge \"###5###\" dem Parameter \"###4###\" in ###3### hinzu"
+label["de_xbi_confMod_replaceValue"]="Ersetze \"###6###\" mit \"###5###\" in Parameter \"###4###\" in ###3###"
+
+label["de_xbi_cmd"]="..."
+
+
+
+################################################################################
+# Sed Functions: file/content modifiers
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Comment/uncomment a parameter in configuration-file
+#
+# Usage:
+#   xbi_confMod ACTION EXECUTION FILENAME PARAMETER [VALUE|COMMENT] [OPERATOR|KEYWORD|SPACER]
+#
+# Examples:
+#   xbi_confMod comment      1 /etc/mysql/my.cnf bind-address '#'
+#   xbi_confMod uncomment    1 /etc/mysql/my.cnf bind-address '#'
+#   xbi_confMod setValue     1 /etc/mysql/my.cnf bind-address localhost [' = ']
+#   xbi_confMod appendValue  1 /etc/mysql/my.cnf bind-address localhost
+#   xbi_confMod replaceValue 1 /etc/mysql/my.cnf bind-address 192 127
+#
+#	$1	string	action (comment|uncomment)
+#	$2	boolean	execute immediately (0|1)
+#	$3	string	filename
+#	$4	string	parameter to change
+#	$5	string	the value or the comment symbol (#)
+#	$6	string	the operator between parameter and value, the spacer if action is "appendValue" OR the keyword to replace in matched line if action="replaceValue"
+#	$?
+#-------------------------------------------------------------------------------
+function xbi_confMod() {
+	local cmd=""
+	local filename="${3}"
+	local parameter="${4}"
+	local value="${5/\//\\\\/}"
+	local option="${6//\//\\\\/}"
+
+	# Escape $ and ? in value with backslash
+	value="${value//$/\\$}"
+	value="${value//\?/\\?}"
+
+	# Create file if it does not exist already
+	[ -r ${filename} ] || touch ${filename}
+
+	# Decide what sed should do
+	case ${1} in
+		comment )
+			# Comment a parameter
+			# TEST: sed -e "s/^\(STANDALONE_OR_INETD\b.*\)/;\1/g" /etc/default/pure-ftpd-common
+
+			# Set default comment-symbol
+			local comment="${value}"
+			[ ${#comment} -eq 0 ] && comment="#"
+			cmd="sed -i -e \"s/^\(${parameter}\b.*\)/${comment}\1/g\" ${filename}"
+			;;
+		uncomment )
+			# Uncomment a parameter
+			# TEST: sed -e "s/^[;]\?\(STANDALONE_OR_INETD1\b.*\)/\1/g" /etc/default/pure-ftpd-common
+
+			# Set default comment-symbol
+			local comment="${value}"
+			[ ${#comment} -eq 0 ] && comment="#"
+			cmd="sed -i -e \"s/^${comment}\?\(${parameter}\b.*\)/\1/g\" ${filename}"
+			;;
+		setValue )
+			# Set new value for existing parameter (overwrite!) or add it to the end of the file if it does not exist
+			# The following test sets "STANDALONE_OR_INETD = standalone" or creates a new parameter if it does not exist already
+			# TEST: { grep -P -q "^STANDALONE_OR_INETD\b.*$" /etc/default/pure-ftpd-common && sed -e "s/^\(STANDALONE_OR_INETD\b[\t =]*\).*$/\1standalone/" /etc/default/pure-ftpd-common || echo "STANDALONE_OR_INETD = standalone" >> /etc/default/pure-ftpd-common; }
+
+			# Set default operator if no one is given
+			local operator="${option}"
+			[ ${#operator} -eq 0 ] && operator="="
+			cmd="{ grep -P -q \"^${parameter}\b.*\$\" ${filename} && sed -i -e \"s/^\(${parameter}\b[\t ${operator}]*\).*\$/\1${value}/\" ${filename} || echo \"${parameter}${operator}${value}\" >> ${filename}; }"
+			;;
+		appendValue )
+			# Append value to param if it does not exist already
+			# TEST: sed -e "/^STANDALONE_OR_INETD\b.*$/ { /.*test.*/{p;d}; s/$/, test/ }" /etc/default/pure-ftpd-common
+
+			local spacer="${option}"
+			[ ${#spacer} -eq 0 ] && spacer=", "
+			cmd="sed -i -e \"/^${parameter}\b.*\$/ { /.*${value}.*/{p;d}; s/\$/${spacer}${value}/ }\" ${filename}"
+			;;
+		replaceValue )
+			# Replace keyword in a parameters value
+			# The following test changes "bind-address = 127.0.0.1" to "bind-address = 192.0.0.1" in section [mysqld]
+			# TEST: sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { /^bind-address\b.*/ { s/127/192/g; } }" /etc/mysql/my.cnf
+
+			local keyword=""
+			[ ${#option} -gt 0 ] && keyword="${option}"
+			cmd="sed -i -e \"/^${parameter}\b.*/ { s/${keyword}/${value}/g; }\" ${filename}"
+			;;
+		* )
+			return 1
+			;;
+	esac
+	# Execute command via xbi_cmd or return command-string
+	if [[ ${2} -eq 1 ]]; then
+		local msg="$(xbi_label xbi_confMod_${1})"
+		msg="${msg//###3###/${3}}"		# Replace filename
+		msg="${msg//###4###/${4}}"		# Replace parameter
+		msg="${msg//###5###/${5}}"		# Replace value
+		msg="${msg//###6###/${6}}"		# Replace option
+		xbi_cmd "${cmd}" "${msg}"
+		return $?
+	else
+		echo "${cmd}"
+	fi
+}
+
+#-------------------------------------------------------------------------------
+# Replace a specific keyword in a line starting with a specific parameter inside a specific part of a textfile. ...comprendere?
+# If you want to change a part of the value of a parameter inside a config-file, but only inside a specific part of the file (i.e.: an INI-section), then this is your friend.
+#
+# Usage:
+#   xbi_iniMod ACTION EXECUTION FILENAME SECTION PARAMETER [VALUE] [OPERATOR|KEYWORD|SPACER]
+#
+# Examples ([] = optional):
+#   xbi_iniMod comment      1 /etc/mysql/my.cnf mysqld bind-address
+#   xbi_iniMod uncomment    1 /etc/mysql/my.cnf mysqld bind-address
+#   xbi_iniMod setValue     1 /etc/mysql/my.cnf mysqld bind-address localhost [=]
+#   xbi_iniMod appendValue  1 /etc/mysql/my.cnf mysqld bind-address test [", "]
+#   xbi_iniMod replaceValue 1 /etc/mysql/my.cnf mysqld bind-address 130 127
+#   xbi_iniMod addParam     1 /etc/mysql/my.cnf mysqld bind-address yes [=]
+#   xbi_iniMod removeParam  1 /etc/mysql/my.cnf mysqld bind-address
+#
+#	$1	string	action
+#	$2	boolean	execute immediately (1) or return generated command for later use (0)
+#	$3	string	filename
+#	$4	string	section
+#	$5	string	parameter name to modify
+#	$6	string	the value which will be inserted/added or the comment symbol in uncomment|comment
+#	$7	string	the operator between parameter and value, the spacer if action is "appendValue" OR the keyword to replace in matched line if action="replaceValue"
+#	$?
+#-------------------------------------------------------------------------------
+function xbi_iniMod() {
+	local cmd=""
+	local filename="${3}"
+	local section="\[[ ]*${4}[ ]*\]"
+	local parameter="${5}"
+	local value="${6//\//\\\\/}"
+	local option="${7//\//\\\\/}"
+
+	# Escape $ and ? in value with backslash
+	value="${value//$/\\$}"
+	value="${value//\?/\\?}"
+
+	# Decide what sed should do
+	case ${1} in
+		comment )
+			# Comment a parameter inside section
+			# TEST: sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { s/^\(bind-address\b.*\)/#\1/g }" /etc/mysql/my.cnf
+			#   The above test changes "bind-address = 127.0.0.1" to "#bind-address = 127.0.0.1" in section [mysqld]
+
+			# Set default comment-symbol
+			local comment="#"
+			[ ${#value} -gt 0 ] && comment="${value}"
+			# Set default comment-symbol
+			local comment="${value}"
+			[ ${#comment} -eq 0 ] && comment="#"
+			cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { s/^\(${parameter}\b.*\)/${comment}\1/g }\" ${filename}"
+			;;
+		uncomment )
+			# Uncomment a parameter inside section
+			# TEST: sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { s/^[#]\?\(bind-address\b.*\)/\1/g }" /etc/mysql/my.cnf
+			#   The above test changes "#bind-address = 127.0.0.1" to "bind-address = 127.0.0.1" in section [mysqld]
+
+			# Set default comment-symbol
+			local comment="#"
+			[ ${#value} -gt 0 ] && comment="${value}"
+			cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { s/^[${comment}]\?\(${parameter}\b.*\)/\1/g }\" ${filename}"
+			;;
+		setValue )
+			# Set/overwrite value for existing parameter inside a section or create parameter at the end of the section if it does not exist
+			# The following test sets "bind-address = localhost" in section [mysqld] or creates a new parameter if it does not exist already
+			# TEST: [ $(sed -n -e "/\[mysqld\]/,/^\[.*\]$/ { s/^\(bind-address\b.*\)$/\1/p; }" /etc/mysql/my.cnf | wc -l) -eq 1 ] && sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { s/^\(bind-address\b[\t =]*\).*$/\1localhost/ }" /etc/mysql/my.cnf || sed -e "/\[mysqld\]/ "'{:a;n;/^\$/!ba;i\'"bind-address = localhost"'' -e '}' /etc/mysql/my.cnf
+
+			# Set default operator if no one is given
+			local operator="${option}"
+			[ ${#operator} -eq 0 ] && operator="="
+			# Append empty line at the bottom of the file, because this sed command cannot append a parameter there if its not empty (WORKAROUND!)
+			[ "$(tail -1 ${filename})" != "" ] && echo "" >> ${filename}
+			cmd="{ [ \$(sed -n -e \"/${section}/,/^\[.*\]\$/ { s/^\(${parameter}\b.*\)\$/\1/p; }\" ${filename} | wc -l) -eq 1 ] && sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { s/^\(${parameter}\b[\t ${operator}]*\).*\$/\1${value}/ }\" ${filename} || sed -i -e \"/${section}/ \"'{:a;n;/^\$/!ba;i\'\"${parameter}${operator}${value}\"'' -e '}' ${filename}; }"
+			;;
+		appendValue )
+			# Add a value to existing parameter inside section (...but only if the value does not exist already)
+			# TEST: sed -e '/^\[mysqld\]$/,/^\[.*\]$/ { /^bind-address.*$/ { /.*test.*/{p;d}; s/$/, test/ } }' /etc/mysql/my.cnf
+
+			# Set default spacer if no one is given (for separation of the values)
+			local spacer="${option}"
+			[ ${#spacer} -eq 0 ] && spacer=", "
+			#cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { /^${parameter}\b.*$/ { /.*${value}.*/{p;d}; s/$/${spacer}${value}/ } }\" ${filename}"
+			cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { /^${parameter}\b.*\$/ { /.*${value}.*/{p;d}; s/\$/${spacer}${value}/ } }\" ${filename}"
+			;;
+		replaceValue )
+			# Replace keyword in a parameters value inside specific section
+			# The following test changes "bind-address = 127.0.0.1" to "bind-address = 192.0.0.1" in section [mysqld]
+			# TEST: sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { /^bind-address\b.*/ { s/127/192/g; } }" /etc/mysql/my.cnf
+
+			local keyword=""
+			[ ${#option} -gt 0 ] && keyword="${option}"
+			cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { /^${parameter}\b.*/ { s/${keyword}/${value}/g; } }\" ${filename}"
+			;;
+		addParam )
+			# Add a new parameter to the bottom of a section if it does not exist already
+			# TEST: [ $(sed -n -e "/\[mysqld\]/,/^\[.*\]$/ { s/^\(bind-address\b.*\)$/\1/p; }" /etc/mysql/my.cnf | wc -l) -eq 1 ] || sed -e "/\[mysqld\]/ "'{:a;n;/^\$/!ba;i\'"bind-address = localhost"'' -e '}' /etc/mysql/my.cnf
+			# Set default operator if no one is given
+
+			local operator="${option}"
+			[ ${#operator} -eq 0 ] && operator=" = "
+			cmd="{ [ \$(sed -n -e \"/${section}/,/^\[.*\]\$/ { s/^\(${parameter}\b.*\)\$/\1/p; }\" ${filename} | wc -l) -eq 1 ] || sed -i -e \"/${section}/ \"'{:a;n;/^\$/!ba;i\'\"${parameter}${operator}${value}\"'' -e '}' ${filename}; }"
+			;;
+		removeParam )
+			# Remove a parameter from section
+			# TEST: sed -e "/^\[mysqld\]$/,/^\[.*\]$/ { s/^\bbind-address\b.*//g }" /etc/mysql/my.cnf
+
+			cmd="sed -i -e \"/^${section}\$/,/^\[.*\]\$/ { s/^${parameter}\b.*//g }\" ${filename}"
+			;;
+		* )
+			return 1
+			;;
+	esac
+	# Execute command via xbi_cmd or return command-string
+	if [[ ${2} -eq 1 ]]; then
+		local msg="$(xbi_label xbi_iniMod_${1})"
+		msg="${msg//###3###/${3}}"		# Replace filename
+		msg="${msg//###4###/${4}}"		# Replace section
+		msg="${msg//###5###/${5}}"		# Replace parameter
+		msg="${msg//###6###/${6}}"		# Replace value
+		msg="${msg//###7###/${7}}"		# Replace value
+		xbi_cmd "${cmd}" "${msg}"
+		return $?
+	else
+		echo "${cmd}"
+	fi
+}
+
+
+
+################################################################################
+# System Functions
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Change DEBIAN_FRONTEND to "noninteractive"
+#-------------------------------------------------------------------------------
+function xbi_setFrontend() {
+	export DEBIAN_FRONTEND=noninteractive
+}
+
+#-------------------------------------------------------------------------------
+# Reset DEBIAN_FRONTEND
+#-------------------------------------------------------------------------------
+function xbi_restoreFrontend() {
+	export DEBIAN_FRONTEND=dialog
+}
+
+#-------------------------------------------------------------------------------
+# Get translated label/message
+#	$1	string	labelId
+#-------------------------------------------------------------------------------
+function xbi_label() {
+	echo ${label["${installerLanguage}_${1}"]}
+}
+
+#-------------------------------------------------------------------------------
+# Get translated label/message with replaced markers
+#	$1	string	labelId
+#	$2	string	replace text
+#-------------------------------------------------------------------------------
+function xbi_labelReplaced() {
+	local msg=$(xbi_label ${1})
+	[ ${#msg} -gt 0 ] && msg=${msg//###/${2}}
+	echo ${msg}
+}
+
+#-------------------------------------------------------------------------------
+# Show error and log to file if something failed
+#	$1	string	error-message
+#-------------------------------------------------------------------------------
+function xbi_fail() {
+	task["${currentTask}_status"]=1
+	[ ${#tasks_install[@]} -gt 1 ] && view_summary
+	echo_status fail "${1}"
+	xbi_writeLog "\n${1}"
+	xbi_writeLog "\n$(xbi_label exitOnError)" 1
+	xbi_exitOnError
+}
+
+#-------------------------------------------------------------------------------
+## Show error-message and exit with code 1
+#-------------------------------------------------------------------------------
+function xbi_exitOnError() {
+	color_red "\n$(xbi_label exitOnError)\n\n"
+	xbi_restoreFrontend
+	exit 1
+}
+
+#-------------------------------------------------------------------------------
+# Show fail-message and exit with code 0
+#-------------------------------------------------------------------------------
+function xbi_exitOnUser() {
+	color_red "\n$(xbi_label exitOnUser)\n\n"
+	xbi_restoreFrontend
+	exit 0
+}
+
+#-------------------------------------------------------------------------------
+# Show success-message and exit with code 0
+#-------------------------------------------------------------------------------
+function xbi_exit() {
+	color_green "\n$(xbi_label end)\n\n"
+	xbi_writeLog "\n$(xbi_label end)\n" 1
+	xbi_restoreFrontend
+	exit 0
+}
+
+#-------------------------------------------------------------------------------
+# Check if a given package is currently installed
+#	$1	string	package(s) (space separated list)
+#	$?	boolean
+#	return 0 if all of the given packages are currently installed
+#	return 1 if all given packages are missing
+#	return 2 if some of the given packages are missing
+#-------------------------------------------------------------------------------
+function xbi_isInstalled() {
+	if [ $(dpkg --list ${1} 2>&1 | egrep ^ii | wc -l) -eq $(wc -w <<< "${1}") ]; then
+		# All requested packages are installed
+		echo 0
+	elif [ $(dpkg --list ${1} 2>&1 | egrep ^ii | wc -l) -gt 0 ]; then
+		# Some packages are installed
+		echo 2
+	else
+		# None of them is installed
+		echo 1
+	fi
+}
+
+#-------------------------------------------------------------------------------
+# Check if given packages is currently available
+#	$1	string	package
+#	$?	boolean	0|1
+#-------------------------------------------------------------------------------
+function xbi_isAvailable() {
+	dpkg --list ${1} >/dev/null 2>&1 && return 0 || return 1
+}
+
+#-------------------------------------------------------------------------------
+# Set log-mode for commands (append to a command)
+#	$1	boolean	loglevel
+#	$?	void
+#-------------------------------------------------------------------------------
+function xbi_setLogMode() {
+	# Set default  loglevel
+	local loglevel="${1}"
+	[[ ! ${loglevel} ]] && loglevel="all"
+	local logCmd=""
+	case ${loglevel} in
+		null )
+			logCmd=" &>/dev/null"
+			;;
+		1 )
+			logCmd=" 1>>${logFile}"
+			;;
+		2 )
+			logCmd=" 2>>${logFile}"
+			;;
+		all )
+			#logCmd=" >>${logFile} 2>&1"
+			logCmd=" &>>${logFile} "
+			;;
+		err )
+			logCmd=" >/dev/null 2>>${logFile}"
+			;;
+		* )
+			logCmd="${1}"
+			;;
+	esac
+	echo "${logCmd}"
+}
+
+#-------------------------------------------------------------------------------
+# Run package installation
+#	$1	string	message
+#	$2	string	packageName
+#	$?	boolean
+#-------------------------------------------------------------------------------
+function xbi_package() {
+	local msg="$(xbi_labelReplaced xbi_package_${1} ${2})"
+	local msg_ok="$(xbi_labelReplaced xbi_package_${1}_ok ${2})"
+	local msg_fail="$(xbi_labelReplaced xbi_package_${1}_fail ${2})"
+	local cmd=""
+	case ${1} in
+		install )
+			cmd="${installCmd} ${2}"
+			;;
+		remove )
+			cmd="${removeCmd} ${2}"
+			;;
+		update )
+			cmd="${updateCmd}"
+			;;
+		upgrade )
+			cmd="${upgradeCmd}"
+			;;
+		start )
+			cmd="service ${2} start"
+			;;
+		restart )
+			cmd="service ${2} restart"
+			;;
+		reload )
+			cmd="service ${2} reload"
+			;;
+		* )
+			return 1
+			;;
+	esac
+	# Output initial message
+	echo -n "[    ] ${msg}   "
+	# Save command to logfile
+	xbi_writeLog "${msg}:"
+	xbi_writeLog "\$ ${cmd}" 2
+	# Run command in background
+	xbi_runCmdBackground "${cmd}$(xbi_setLogMode all)" 0
+	# Evaluate return value
+	xbi_cmdEvaluate ${?} 0 1 "${msg_ok}" "${msg_fail}"
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# Execute a single command
+# Log process to file and echo running/success/failed-messages
+#	$1	string	command
+#	$2	string	message
+#	$3	boolean	loglevel (see xbi_setLogMode)
+#	$4	boolean	hardFail 0|1
+#	$?	void	return 0
+#-------------------------------------------------------------------------------
+function xbi_cmd() {
+	local cmd="${1}"
+	# Set initial messages
+	local msg="${2}"
+	# Run as silent command if message is empty
+	local silentMode=1
+	# Set hardfail as default behaviour
+	local hardFail=1
+	[[ -n ${4} ]] && hardFail=${4}
+	# Hardfail if command is empty
+	[ ${#cmd} -eq 0 ] && xbi_fail "-- function xbi_cmd : empty command --"
+	# Switch silent-mode off and display message if not empty
+	if [ ${#msg} -gt 0 ]; then
+		echo -n "[    ] ${msg}   "
+		silentMode=0
+	fi
+	# Log command to file
+	xbi_writeLog "${msg}:"
+	xbi_writeLog "\$ ${cmd}" 2
+	# Run command in background
+	xbi_runCmdBackground "{ ${cmd}; }$(xbi_setLogMode ${3})" ${silentMode}
+	exitCode=${?}
+	# Evaluate return value
+	xbi_cmdEvaluate ${exitCode} ${silentMode} ${hardFail} "${msg}" "${msg}"
+	return ${exitCode}
+}
+
+#-------------------------------------------------------------------------------
+# Add commands to the command-queue
+#	$1	string	the command to add
+#	$2	boolean	loglevel (see xbi_setLogMode)
+#-------------------------------------------------------------------------------
+function xbi_cmdQueue() {
+	# Declare cmd-array if not declared already
+	declare -p "newCmdQueue" 2> /dev/null | grep -q '^declare \-A' || declare -g -A "newCmdQueue"	# For logfile
+	declare -p "newCmdQueueReal" 2> /dev/null | grep -q '^declare \-A' || declare -g -A "newCmdQueueReal"
+	# Counts the number of queued commands
+	local cmdCount=${#newCmdQueue[@]}
+	# Add command to the command-queue
+	newCmdQueue[${cmdCount}]="${1}"
+	newCmdQueueReal[${cmdCount}]="{ ${1}; }$(xbi_setLogMode ${2})"
+}
+
+#-------------------------------------------------------------------------------
+# Manage the command-queue
+#	$1	string	the name of the queue
+#	$2	string	the label-marker-replacement
+#	$3	boolean	hardFail 0|1
+#	$?	void	return 0 if everything went fine, or hardFail
+#-------------------------------------------------------------------------------
+function xbi_cmdQueueExec() {
+	# Set the queue-name
+	local queueName="${1}"
+	# Placeholder for the command
+	local cmd=""
+	# Run as silent command if message is empty
+	local silentMode=1
+	# Fail per default
+	local exitCode=1
+	# Set hardfail as default behaviour
+	local hardFail=1
+	[[ -n ${3} ]] && hardFail=${3}
+	# Declare cmd-array if is missing
+	declare -p newCmdQueue 2> /dev/null | grep -q '^declare \-A' || declare -g -A newCmdQueue
+	declare -p newCmdQueueReal 2> /dev/null | grep -q '^declare \-A' || declare -g -A newCmdQueueReal
+	# Set initial messages
+	local msg="${queueName}"
+	local msg_ok=""
+	local msg_fail=""
+	# Echo message
+	if [ ${#queueName} -gt 0 ]; then
+		msg=$(xbi_labelReplaced task_${currentTask}_queue_${queueName} "${2}")
+		msg_ok=$(xbi_labelReplaced task_${currentTask}_queue_${queueName}_ok "${2}")
+		msg_fail=$(xbi_labelReplaced task_${currentTask}_queue_${queueName}_fail "${2}")
+		# Override labels
+		[ ${#msg} -eq 0 ] && msg="${queueName}"
+		[ ${#msg_ok} -eq 0 ] && msg_ok="${msg}"
+		[ ${#msg_fail} -eq 0 ] && msg_fail="${msg}"
+		echo -n "[    ] ${msg}   "
+		silentMode=0
+	fi
+	# Save the queue to the logfile
+	xbi_writeLog "${msg}:"
+	# Iterate through the command-queue
+	for ((i=0; i < ${#newCmdQueueReal[@]}; i++)); do
+		# Write the command to the logfile (append to current queue)
+		xbi_writeLog "\$ ${newCmdQueue[$i]}" 2
+		# Execute command and log errors directly to logfile
+		xbi_runCmdBackground "${newCmdQueueReal[$i]}" ${silentMode}
+		# Break the loop if command returns an error
+		exitCode=$?
+		[ ${exitCode} -gt 0 ] && break
+	done
+	# Flush command-queue (unset array)
+	unset newCmdQueue
+	unset newCmdQueueReal
+	# Evaluate return value
+	xbi_cmdEvaluate ${exitCode} ${silentMode} ${hardFail} "${msg_ok}" "${msg_fail}"
+	return ${exitCode}
+}
+
+#-------------------------------------------------------------------------------
+# Run command in background
+# Echo a spinning wheel or simple be silent meanwhile
+#	$1	string	command to execute
+#	$2	boolean	silent-mode 0|1
+#	$?	void	exitcode of the executed command(s)
+#-------------------------------------------------------------------------------
+function xbi_runCmdBackground() {
+	if [[ ${#1} -gt 0 ]]; then
+		# Silentmode?
+		local waitCmd="${defaultWaitCmd}"
+		# Command/function to run while waiting for the process to return
+		if [[ ${2} -eq 0 ]]; then
+			waitCmd=echo_spinner
+		fi
+		# Look for the 4 common signals that indicate that this script was killed.
+		# If the background command was started, kill it too.
+		trap '[ -z $! ] || kill $! || exit 1' SIGHUP SIGINT SIGQUIT SIGTERM
+		# Run command in the background
+		eval "${1} &"
+		# Get PID of the background installation-process
+		local pid=${!}
+		# Do waitCmd while waiting for the background-process to return
+		while [ -e /proc/${pid} ]; do
+			${waitCmd}
+		done
+		trap - exit
+		# Wait until we get the exitcode
+		wait ${pid}
+		local exitCode=${?}
+		# Return exitcode from executed command
+		return ${exitCode}
+	fi
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# Evaluate the return value from background-process and echo appropriate message
+#	$1	boolean	exitcode
+#	$2	boolean	silentmode (do not echo a message)
+#	$3	boolean	hardFail 0|1
+#	$4	string	success-message
+#	$5	string	failure-message
+#-------------------------------------------------------------------------------
+function xbi_cmdEvaluate() {
+	if [ ${1} -eq 0 ]; then
+		if [ ${2} -eq 0 ]; then
+		  echo -en "\r"
+		  echo_status ok "${4}"
+		fi
+	else
+		if [ ${2} -eq 0 ]; then
+			echo -en "\r"
+			echo_status fail "${5}"
+		fi
+		[ ${3} -eq 1 ] && xbi_fail "${5}"
+	fi
+}
+
+#-------------------------------------------------------------------------------
+# Check if a specific task should be executed via commandline-argument
+#-------------------------------------------------------------------------------
+function xbi_runByArgument() {
+	if [ -n $1 ] && [ "${1}" != "" ]; then
+		# Initialize installer
+		tasks_install["${1}"]=1
+		#unattendedInstallation=1
+		xbi_init 1
+		dialog_userVariables
+		xbi_callFunction "${1}"
+		# Output status of the task
+		echo_status ok "$(xbi_label taskSuccess)"
+		xbi_exit
+	fi
+}
+
+#-------------------------------------------------------------------------------
+# Run automated installation of tasks enabled by whiptail-userinput
+#	$?	void
+#-------------------------------------------------------------------------------
+function xbi_runInstall() {
+	local function=""
+	local taskName=""
+	local return=0
+	# Set status of all tasks to "unprocessed"
+	for i in "${tasks[@]}"; do
+		task["${i}_status"]=3
+	done
+	for i in "${tasks[@]}"; do
+		taskName="${i}"
+		# Set status of the task to "skip"
+		task["${taskName}_status"]=2
+		# Execute task-functions
+		if [[ ${tasks_install["${taskName}"]} ]]; then
+			# Run task-function
+			xbi_callFunction ${taskName}
+			# Set status of the task
+			task["${currentTask}_status"]=0
+			# Output status of the task
+			echo_status ok "$(xbi_label taskSuccess)"
+			sed -i "/^${currentTask}$/d" ${taskFile}
+		fi
+	done
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# Call the function and output the title of the requested task
+#	$1	string	taskname
+#	$?	void
+#-------------------------------------------------------------------------------
+function xbi_callFunction() {
+	currentTask="${1}"
+	local function="task_${currentTask}"
+	local return=1
+	if [ $(type -t $function 2>&1) ]; then
+		# Flush command-queue (unset array)
+		unset newCmdQueue
+		unset newCmdQueueReal
+		# Set title of the task
+		local taskTitle=${label["${installerLanguage}_${function}_title"]}
+		[ ${#taskTitle} -eq 0 ] && taskTitle=${currentTask}
+		echo_title "--> ${taskTitle}"
+		# Execute function
+		$function
+		# Get last return
+		return=$?
+	else
+		echo $(xbi_labelReplaced "taskNotFound" "${currentTask}")
+		xbi_exitOnError
+	fi
+	return ${return}
+}
+
+#-------------------------------------------------------------------------------
+# Execute a task-hook (external user-functions)
+#-------------------------------------------------------------------------------
+function xbi_hook() {
+	local function="task_${currentTask}_${1}"
+	if [ $(type -t $function 2>&1) ]; then
+		# Flush command-queue (unset array)
+		unset newCmdQueue
+		unset newCmdQueueReal
+		# Set title of the (sub)task
+		local taskTitle=${label["${installerLanguage}_${function}_${1}_title"]}
+		[ ${#taskTitle} -eq 0 ] && taskTitle="${function}"
+		xbi_writeLog "$(xbi_labelReplaced runningHook ${function})"
+		# Set the name of the current subtask
+		currentSubTask="${1}"
+		# Execute function
+		$function
+		# Get last return
+		return=$?
+		# Reset subtask
+		currentSubTask=""
+		[ ${return} -gt 0 ] && xbi_fail "$(xbi_labelReplaced hookError ${function})"
+	fi
+}
+
+#-------------------------------------------------------------------------------
+# Write string to logfile prepended with current date
+#	$1	string	message to log
+#	$2	boolean	echoMode
+#	$?	void
+#-------------------------------------------------------------------------------
+function xbi_writeLog() {
+	logContent=${1}
+	# Grab all variables starting with password_*
+	local passwordContainer=${!password_*}
+	local password=""
+	# Replace all known passwords in content
+	if [ ${hidePasswordsInLogFile} -eq 1 ]; then
+		for password in $passwordContainer ; do
+			password="${!password}"
+			if [ ${#password} -ge 4 ]; then
+				logContent=$(sed "s/\b${password}\b/xxx/g" <<< "${logContent}")
+			fi
+		done
+	fi
+	case ${2} in
+		1 )
+			echo -e "${logContent}" >>${logFile}
+			;;
+		2 )
+			echo "${logContent}" >>${logFile}
+			;;
+		* )
+			subTask=""
+			[ ${#currentSubTask} -gt 0 ] && local subTask="_${currentSubTask}"
+			echo -e "\n# [task_${currentTask}${subTask}] ${logContent}" >>${logFile}
+			;;
+	esac
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# XXX: not in use
+# Echo last N lines from the logfile
+#	$?	void
+function xbi_lastlog() {
+	local msg="$(xbi_label xbi_lastlog)"
+	msg=${msg//###N###/${logTail}}
+	msg=${msg//###LOG###/${logFile}}
+	echo_subheader "${msg}"
+	echo "[....]"
+	tail -10 ${logFile}
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# Create backup a file in the same directory with suffix
+#	$1	string	file to backup
+#	$2	boolean	suffix for the backup-file (default = bckp)
+#	$?	void
+#-------------------------------------------------------------------------------
+function xbi_backup() {
+	suffix="${2}"
+	# Use default suffix if $2 is empty
+	[[ ! ${suffix} ]] && suffix=".bckp"
+	targetFile="${1}${suffix}"
+	# Check if a backup exists already
+	if [ -f ${targetFile} ]; then
+		echo_status ok "$(xbi_labelReplaced xbi_backup_softfail ${targetFile})"
+		return 0
+	fi
+	# Create backup if sourcefile exists and backup does not exist
+	if [ -f ${1} ] && [ ! -f ${targetFile} ]; then
+		xbi_cmd "cp -p ${1} ${targetFile}" \
+			"$(xbi_labelReplaced xbi_backup ${targetFile})"
+	fi
+	return 0
+}
+
+#-------------------------------------------------------------------------------
+# Generates a single password and stores it into file and into variable
+#	$1	string	passId
+#-------------------------------------------------------------------------------
+function xbi_setPassword() {
+	local passId="password_${1}"
+	# Get password
+	local password="${!passId}"
+	# Check if password is empty
+	if [ ${#password} -eq 0 ] && [[ ${passwordAutogen} -eq 1 ]]; then
+		# Generate password
+		password=$(echo "$(date +%s)_${1}" | $(which sha256sum) | $(which base64) | $(which head) -c 32)
+		eval $passId=\$password
+	elif [ ${#password} -eq 0 ]; then
+		# Display dialog for user-input
+		dialog_checkPassword ${1}
+		password=${!passId}
+	fi
+	# Write password to file
+	if [ -f ${passwdFile} ] && [ $(grep -P "^${passId}\b.*$" ${passwdFile} | wc -l) -gt 0 ]; then
+		sed -i -e "s/^\(${passId}\b=\).*$/\1${password}/" ${passwdFile}
+	else
+		echo "# $(xbi_label ${passId})" >>${passwdFile}
+		echo "${passId}=${password}" >>${passwdFile}
+		echo "" >>${passwdFile}
+	fi
+	chmod 0600 ${passwdFile}
+}
+
+#-------------------------------------------------------------------------------
+# Initialize installer
+#	$1	boolean	Reset logfile
+#-------------------------------------------------------------------------------
+function xbi_init() {
+	# Reset logfile
+	if [[ ${1} -eq 1 ]]; then
+		echo -e "#$(echo_paddedString - 79)\n# $(xbi_label pluginTitle) $(date '+%d.%m.%Y %H:%M:%S')" >${logFile}
+	fi
+
+	# Detect operatingsystem version and hardfail if not a debian jessie
+	local version="$(echo -e $(cat /etc/issue) | tail -2 | head -n1)"
+	# Current debian-version
+	#osVersion=$(cat /etc/debian_version)
+
+	if [ $(cat /etc/debian_version | cut -c1) = "8" ] || [ $(cat /etc/debian_version) = "jessie/sid" ]; then
+		echo_status ok "$(xbi_labelReplaced xbi_init_os_ok "${version}")"
+	else
+		echo_status fail "$(xbi_labelReplaced xbi_init_os_fail "${version}")"
+	fi
+}
+
+
+
+################################################################################
+# INTERFACE: colors
+################################################################################
+
+# Echo message in green color
+function color_green() {
+	echo -en "\e[32m${1}\e[39m"
+}
+# Echo message in green color and bold (~)
+function color_greenBold() {
+	echo -en "\e[92m${1}\e[39m"
+}
+# Echo message in magenta color
+function color_magenta() {
+	echo -en "\e[35m${1}\e[39m"
+}
+# Echo message in magenta color and bold (~)
+function color_magentaBold() {
+	echo -en "\e[95m${1}\e[39m"
+}
+# Echo message in red color
+function color_red() {
+	echo -en "\e[31m${1}\e[39m"
+}
+# Echo message in red color and bold (~)
+function color_redBold() {
+	echo -en "\e[91m${1}\e[39m"
+}
+# Echo message in cyan color
+function color_cyan() {
+	echo -en "\e[36m${1}\e[39m"
+}
+# Echo message in cyan color and bold (~)
+function color_cyanBold() {
+	echo -en "\e[96m${1}\e[39m"
+}
+# Echo message in yellow color
+function color_yellow() {
+	echo -en "\e[33m${1}\e[39m"
+}
+# Echo message in yellow color and bold (~)
+function color_yellowBold() {
+	echo -en "\e[93m${1}\e[39m"
+}
+# Echo message in grey color (~)
+function color_grey() {
+	echo -en "\e[90m${1}\e[39m"
+}
+# Invert text style (swap foreground with background)
+function color_styleReverse() {
+	echo -en "\e[7m${1}\e[27m"
+}
+
+
+
+################################################################################
+# INTERFACE: echos
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Echo formatted header
+#	$1	string	A message/title/header/...
+#	$?	string	The formatted output
+#-------------------------------------------------------------------------------
+function echo_title() {
+	local str=$(color_greenBold "${1}")
+	#str=$(color_styleReverse "${str}")
+	echo -e "\n$(echo_paddedString)\n${str}"
+}
+
+#-------------------------------------------------------------------------------
+# Echo formatted subheader
+#	$1	string	A message/title/header/...
+#	$?	string	The formatted output
+#-------------------------------------------------------------------------------
+function echo_subheader() {
+	local str=$(color_magenta "${1}")
+	echo -e "\n$(echo_paddedString)\n${str}"
+}
+
+#-------------------------------------------------------------------------------
+# Output padded string
+#	$1	string	The char which should be repeated
+#	$2	boolean	The number of repetitions
+#	$?	string	The padded string
+#-------------------------------------------------------------------------------
+function echo_paddedString() {
+	local str=""
+	local count=0
+	[ ${1} ] && char="${1}" || char="-"
+	[ ${2} ] && len=${2} || len=80
+	while [ ${count} -lt ${len} ]; do
+		str="${str}${char}"
+		let count=count+1
+	done
+	echo ${str}
+}
+
+#-------------------------------------------------------------------------------
+# Echo status-message
+#	$1	string	Status to show
+#	$2	string	The message to append
+#	$?	string	The final message containing the status
+#-------------------------------------------------------------------------------
+function echo_status() {
+	local status=""
+	local str=""
+	[ -n "$2" ] && str="$2"
+	case ${1} in
+		ok|0 )
+			status=" $(color_green ok) "
+			;;
+		fail|1 )
+			status="$(color_redBold fail)"
+			;;
+		warn )
+			status="$(color_yellowBold warn)"
+			;;
+		info )
+			status="$(color_cyanBold info)"
+			;;
+		skip )
+			status="$(color_grey skip)"
+			;;
+		* )
+			status="    "
+			;;
+	esac
+	echo -e "[${status}] ${str}"
+}
+
+#-------------------------------------------------------------------------------
+# Echo formatted variable
+#	$1	string	labelId/variableName
+#-------------------------------------------------------------------------------
+function echo_variable() {
+	local str="$(xbi_label var_${1}):"
+	local var=$(color_greenBold "${!1}")
+	local len=${#str}
+	while [ $len -lt 26 ]; do
+		str="${str} "
+		let len=len+1
+	done
+	echo -e "  ${str} ${var}"
+}
+
+#-------------------------------------------------------------------------------
+# Echo formatted status of a task with checkboxes
+#	$1	boolean	checked or unchecked 0|1
+#	$2	string	labelId
+#-------------------------------------------------------------------------------
+function echo_checked() {
+	local str="${2}"
+	local description=${label["${installerLanguage}_task_${2}_title"]}
+	len=${#str}
+	if [ $1 -eq 1 ]; then
+		str="[ $(color_greenBold X) ] ${str}"
+	else
+		str=$(color_grey "${str}")
+		str="[   ] ${str}"
+		description=$(color_grey "${description}")
+	fi
+	while [ $len -lt 16 ]; do
+		str="${str} "
+		let len=len+1
+	done
+	echo -e "  ${str}${description}"
+}
+
+#-------------------------------------------------------------------------------
+# Echo a spinning text as loading indicator
+#-------------------------------------------------------------------------------
+function echo_spinner() {
+	for (( charPos=0; charPos<${#spinnerText}; charPos++ )); do
+		echo -en "\b\b${spinnerText:$charPos:1} "
+		sleep ${spinnerSleeptime}
+	done
+}
+
+
+
+################################################################################
+# INTERFACE: Views
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Output summary of tasks to perform
+#-------------------------------------------------------------------------------
+function view_tasks() {
+	echo_subheader "$(xbi_label view_tasks)"
+	# Iterate through available tasks
+	for i in "${tasks[@]}"; do
+		# Echo appropriate status if task is selected
+		if [[ ${tasks_install["${i}"]} ]]; then
+			echo_checked 1 ${i}
+		else
+			echo_checked 0 ${i}
+		fi
+	done
+}
+
+#-------------------------------------------------------------------------------
+# Output a brief summary of the user-input (plugin-dependent)
+#-------------------------------------------------------------------------------
+function view_userVariables() {
+	# Execute function for user-inputs
+	local function="${pluginId}_view_userVariables"
+	[ $(type -t $function 2>&1) ] && $function
+}
+
+#-------------------------------------------------------------------------------
+# Check for errors and output a brief overview of the performed tasks
+#-------------------------------------------------------------------------------
+function view_summary() {
+	echo_subheader "$(xbi_label view_summary)"
+	local output=""
+	local taskName=""
+	local str=""
+	local description=""
+	local len=0
+	for i in "${tasks[@]}"; do
+		taskName="${i}"
+		str="${taskName}"
+		description=${label["${installerLanguage}_task_${taskName}_title"]}
+		# Pad string to a fixed amount of chars
+		len=${#str}
+		while [ $len -lt 16 ]; do
+			str="$str "
+			let len=len+1
+		done
+		str="${str}${description}"
+		# Pad string to a fixed amount of chars
+		len=${#str}
+		while [ $len -lt 70 ]; do
+			str="$str "
+			let len=len+1
+		done
+		# Decide how the output should look like
+		case ${task["${taskName}_status"]} in
+			0 )
+				str="${str}$(echo_status ok)"
+				;;
+			1 )
+				str="${str}$(echo_status fail)"
+				;;
+			2 )
+				str=$(color_grey "$str")
+				str="${str}$(echo_status skip)"
+				;;
+			* )
+				if [[ ! ${tasks_install["${taskName}"]} ]]; then
+					str=$(color_grey "$str")
+				fi
+				str="${str}$(echo_status)"
+				;;
+		esac
+		output="${output}\n  ${str}"
+	done
+	echo -e "${output}\n"
+}
+
+
+
+################################################################################
+# INTERFACE: Dialogs
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Show welcome-dialog
+#-------------------------------------------------------------------------------
+function dialog_welcome() {
+	${whiptail} --backtitle "$(xbi_label pluginTitle)" --yesno "$(xbi_label dialog_welcome_message)" --title "$(xbi_label dialog_welcome_title)" --yes-button "$(xbi_label next)" --no-button "$(xbi_label cancel)"  18 70
+	[ $? -eq 0 ] || xbi_exitOnUser
+}
+
+#-------------------------------------------------------------------------------
+# Write temporary menuFile and run whiptail with translated messages.
+# Writes a temporary file which holds the tasknames of the selected tasks to
+# remember the last position when installer fails.
+#-------------------------------------------------------------------------------
+function dialog_chooseInstallerTasks() {
+	declare -g -A task_choosen
+
+	# If there is no menufile available, create one and put the tasknames in there
+	if [ ! -s ${taskFile} ] || [ ! -f ${taskFile} ]; then
+		for i in "${tasks[@]}"; do
+			if [ ${task["${i}_checked"]} ] && [ ${task["${i}_checked"]} -eq 1 ]; then
+				echo "${i}" >>${taskFile}
+			fi
+		done
+	fi
+
+	# Read the tasks from the menufile
+	while read taskName; do task_choosen[${taskName}]=1; done < ${taskFile}
+
+	# Create the menu-options for whiptail
+	local options=""
+	for i in "${tasks[@]}"; do
+		[[ ${task_choosen[${i}]} ]] && checked="yes" || checked="no"
+		options="${options} $i \"${label[${installerLanguage}_task_${i}_title]} \" ${checked} "
+	done
+
+	# Run whiptail
+	local cmd="${whiptail} --backtitle \"$(xbi_label pluginTitle)\" --title \"$(xbi_label dialog_tasks_title)\" --checklist \"$(xbi_label dialog_tasks_message)\" 23 78 16 --separate-output ${options}"
+	eval "${cmd} 2>${taskFile}"
+	[ $? -eq 0 ] || xbi_exitOnUser
+
+	# (Re)read the tasks from the menufile and mark them to be installed
+	while read taskName; do tasks_install["${taskName}"]=1; done < ${taskFile}
+}
+
+#-------------------------------------------------------------------------------
+# Input user variables
+#-------------------------------------------------------------------------------
+function dialog_userVariables() {
+	# Execute function for user-inputs
+	local function="${pluginId}_dialog_userVariables"
+	[ $(type -t $function 2>&1) ] && $function
+}
+
+#-------------------------------------------------------------------------------
+# Show password-input and write password it to variable
+#	$1	string	passId
+#-------------------------------------------------------------------------------
+function dialog_checkPassword() {
+	local passId="password_${1}"
+	local password=""
+	local passwordRepeat=""
+	local pass=0
+	local result=0
+	while [ $pass -eq 0 ]; do
+		password=$(${whiptail} --backtitle "$(xbi_label pluginTitle)" --passwordbox "$(xbi_label dialog_${passId}_message)" 9 78 --title "$(xbi_label dialog_${passId}_title)" 3>&1 1>&2 2>&3)
+		[ $? -eq 0 ] || xbi_exitOnUser
+		passwordRepeat=$(${whiptail} --backtitle "$(xbi_label pluginTitle)" --passwordbox "$(xbi_label dialog_${passId}_repeat_message)" 9 78 --title "$(xbi_label dialog_${passId}_title)" 3>&1 1>&2 2>&3)
+		[ $? -eq 0 ] || xbi_exitOnUser
+		if [ ${#password} -gt 3 ]; then
+			if [ "${password}" = "${passwordRepeat}" ]; then
+				pass=1
+			else
+				result=$(${whiptail} --backtitle "$(xbi_label pluginTitle)" --msgbox "$(xbi_label dialog_checkPassword_different)" 12 44 3>&1 1>&2 2>&3)
+			fi
+		else
+			result=$(${whiptail} --backtitle "$(xbi_label pluginTitle)" --msgbox "$(xbi_label dialog_checkPassword_toShort)" 12 44 3>&1 1>&2 2>&3)
+		fi
+		local r=${passId}
+		password=${password/\"/\\\"}
+		eval $r=\$password
+	done
+}
+
+#-------------------------------------------------------------------------------
+# Show user input "Install [y/N] ?"
+#-------------------------------------------------------------------------------
+function dialog_proceed() {
+	echo ""
+	read -p "$(xbi_label continueQuestion) " action
+	if [ $action ] && [ $action = "j" -o $action = "J" -o $action = "y" -o $action = "Y" ]; then
+		echo -e "$(xbi_label continueInstallation)\n"
+		return 0
+	fi
+	xbi_exitOnUser
+}
+
+
+
+################################################################################
+# Bootstrap
+################################################################################
+
+function xbi_bootstrap() {
+	echo -e "$(xbi_label pluginTitle)"
+	# Set debian frontend to "noninteractive"
+	xbi_setFrontend
+	# Check if a specific task should be executed via commandline-argument
+	xbi_runByArgument ${1}
+	# Show welcome-dialog
+	dialog_welcome
+	# Show dialog to select packages
+	dialog_chooseInstallerTasks
+	# Get user variables
+	dialog_userVariables
+	# Show the selected packages
+	view_tasks
+	# Show the user variables
+	view_userVariables
+	# Install [y/N] ?
+	dialog_proceed
+	# Initialize installer
+	xbi_init
+	# Run tasks
+	xbi_runInstall
+	# Display a brief summary of the processed tasks
+	view_summary
+	# Exit & Reset variables
+	xbi_exit
+}
+
+# Output welcome-message
+echo_title "$(xbi_label title)\n"
+
+# Nothing else to do ...the rest is up to the installer-plugin
